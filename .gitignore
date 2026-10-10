@@ -2,6 +2,15 @@
 *.log
 server*.log
 
+# Local notes and assets that are not part of the published app
+/question.md
+/培养.md
+/战斗.md
+/quick-deploy.bat
+/radar.jpg
+/迷海/goal.md
+/迷海/task.md
+
 node_modules/
 dist/
 build/
