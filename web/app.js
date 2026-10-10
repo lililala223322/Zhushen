@@ -1,8 +1,10 @@
 (function () {
   const data = window.RULE_DATA;
   const calc = window.GrowthCalc;
+  const core = window.ZhushenCore;
   const storageKey = "hongchao-growth-build-v2";
   const roleTemplateKey = "hongchao-role-templates-v1";
+  const roleTemplateDraftNameKey = "hongchao-role-template-draft-v1";
   const fallbackWeaponTypes = [
     "刀", "刺剑", "匕首", "单手剑", "单手斧", "单手锤", "双手剑", "双手斧", "双手杖",
     "弩", "战旗", "权杖", "枪", "琴", "瓶子", "短弓", "重弩", "链锤", "长弓", "长柄", "骑枪",
@@ -11,6 +13,31 @@
 
   function zeroVector() {
     return Object.fromEntries(data.stats.map((stat) => [stat, 0]));
+  }
+
+  function cloneStatVector(source) {
+    return Object.assign(zeroVector(), source || {});
+  }
+
+  function heirloomStatOrder() {
+    return ["strength", "technique", "agility", "constitution", "perception", "will"]
+      .filter((stat) => data.stats.includes(stat));
+  }
+
+  function clampHeirloomLevel(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return 0;
+    return Math.max(0, Math.min(120, number));
+  }
+
+  function createDefaultHeirloomState(characterPotential, className) {
+    const classNames = Object.keys(data.classGrowth);
+    const fallbackClass = data.classGrowth[className] ? className : classNames[0];
+    return {
+      characterPotential: cloneStatVector(characterPotential),
+      className: fallbackClass,
+      level: 60,
+    };
   }
 
   function createDefaultPlannerState() {
@@ -44,8 +71,8 @@
       seed: 20260623,
       evaluationRound: 0,
       lastDurationMs: 0,
-      usePlannerTargets: true,
       equipmentWeight: 0,
+      constraints: [],
       targetWeights: Object.assign(zeroVector(), { strength: 0.5, technique: 1, agility: 1 }),
       selectedTemplateIds: [],
       result: null,
@@ -65,25 +92,32 @@
       ],
       currentState: {
         enabled: false,
+        collapsed: true,
         currentLevel: 1,
         className: "丛林猎手",
         stats: zeroVector(),
       },
+      injectedPotential: zeroVector(),
+      basicPotentialCollapsed: false,
+      injectedPotentialCollapsed: true,
+      traitsCollapsed: true,
       traitIds: ["divine-fala", "fala-bird", "fala-forest-heir", "m-fala-nature-spirit"],
       collapsedGroups: [],
+      breakdownCollapsed: true,
       equipmentStats: zeroVector(),
       finalClass: "掠袭骑兵",
       planner: createDefaultPlannerState(),
       limitEvaluator: createDefaultLimitState(),
     };
     base.characterPotential = calc.calculateBasePotential(base);
+    base.heirloom = createDefaultHeirloomState(base.characterPotential, base.finalClass);
     return base;
   }
 
   let state = loadState() || createDefaultState();
   let activeView = "calculator";
   let roleTemplates = loadRoleTemplates();
-  let roleTemplateDraftName = "";
+  let roleTemplateDraftName = loadRoleTemplateDraftName();
   sanitizeTraits();
 
   function loadState() {
@@ -99,11 +133,33 @@
   }
 
   function saveState() {
-    const snapshot = Object.assign({}, state, {
+    writeStateSnapshot();
+    flashStatus("已保存");
+  }
+
+  function stateSnapshot() {
+    return Object.assign({}, state, {
       limitEvaluator: Object.assign({}, state.limitEvaluator, { result: null, history: [] }),
     });
-    localStorage.setItem(storageKey, JSON.stringify(snapshot));
-    flashStatus("已保存");
+  }
+
+  function writeStateSnapshot() {
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(stateSnapshot()));
+      saveRoleTemplateDraftName();
+    } catch {
+      // Local storage can be unavailable in private or restricted browser modes.
+    }
+  }
+
+  let rememberTimer = 0;
+
+  function rememberStateSoon() {
+    if (rememberTimer) return;
+    rememberTimer = window.setTimeout(() => {
+      rememberTimer = 0;
+      writeStateSnapshot();
+    }, 0);
   }
 
   function loadRoleTemplates() {
@@ -117,6 +173,22 @@
 
   function saveRoleTemplates() {
     localStorage.setItem(roleTemplateKey, JSON.stringify(roleTemplates));
+  }
+
+  function loadRoleTemplateDraftName() {
+    try {
+      return String(localStorage.getItem(roleTemplateDraftNameKey) || "");
+    } catch {
+      return "";
+    }
+  }
+
+  function saveRoleTemplateDraftName() {
+    try {
+      localStorage.setItem(roleTemplateDraftNameKey, roleTemplateDraftName);
+    } catch {
+      // Local storage can be unavailable in private or restricted browser modes.
+    }
   }
 
   function normalizeRoleTemplates(value) {
@@ -143,6 +215,10 @@
       level: Number(value?.level) || fallback.level,
       bloodlines,
       currentState: normalizeCurrentState(value?.currentState, fallback.currentState),
+      injectedPotential: Object.assign(zeroVector(), value?.injectedPotential || {}),
+      basicPotentialCollapsed: Boolean(value?.basicPotentialCollapsed),
+      injectedPotentialCollapsed: value?.injectedPotentialCollapsed === undefined ? fallback.injectedPotentialCollapsed : Boolean(value.injectedPotentialCollapsed),
+      traitsCollapsed: value?.traitsCollapsed === undefined ? fallback.traitsCollapsed : Boolean(value.traitsCollapsed),
       growthSegments: Array.isArray(value?.growthSegments) && value.growthSegments.length
         ? value.growthSegments.map((segment) => ({
           fromLevel: Number(segment.fromLevel) || 1,
@@ -154,6 +230,7 @@
         ? value.traitIds.filter((id) => data.traits.some((trait) => trait.id === id))
         : fallback.traitIds,
       collapsedGroups: Array.isArray(value?.collapsedGroups) ? value.collapsedGroups : [],
+      breakdownCollapsed: value?.breakdownCollapsed !== false,
       equipmentStats: Object.assign(zeroVector(), value?.equipmentStats || {}),
       finalClass: data.classValues[value?.finalClass] ? value.finalClass : fallback.finalClass,
       planner: normalizePlannerState(value?.planner, fallback.planner),
@@ -163,7 +240,19 @@
       zeroVector(),
       value?.characterPotential || calc.calculateBasePotential(normalized)
     );
+    normalized.heirloom = normalizeHeirloomState(value?.heirloom, fallback.heirloom);
     return normalized;
+  }
+
+  function normalizeHeirloomState(value, fallback) {
+    const classNames = Object.keys(data.classGrowth);
+    const fallbackClass = fallback?.className && data.classGrowth[fallback.className] ? fallback.className : classNames[0];
+    const levelSource = value?.level === undefined ? fallback?.level : value.level;
+    return {
+      characterPotential: cloneStatVector(value?.characterPotential || fallback?.characterPotential),
+      className: data.classGrowth[value?.className] ? value.className : fallbackClass,
+      level: clampHeirloomLevel(levelSource),
+    };
   }
 
   function normalizeLimitState(value, fallback) {
@@ -173,13 +262,24 @@
       seed: Number(value?.seed) || fallback.seed,
       evaluationRound: Math.max(0, Number(value?.evaluationRound) || 0),
       lastDurationMs: Math.max(0, Number(value?.lastDurationMs) || 0),
-      usePlannerTargets: value?.usePlannerTargets !== false,
       equipmentWeight: Math.max(0, Number(value?.equipmentWeight) || 0),
+      constraints: normalizeLimitConstraints(value?.constraints || fallback.constraints),
       targetWeights,
       selectedTemplateIds: Array.isArray(value?.selectedTemplateIds) ? value.selectedTemplateIds.map(String) : [],
       result: null,
       history: [],
     };
+  }
+
+  function normalizeLimitConstraints(value) {
+    const rows = Array.isArray(value) ? value : [];
+    return rows
+      .map((row, index) => ({
+        id: String(row?.id || `constraint-${Date.now()}-${index}`),
+        stat: data.stats.includes(row?.stat) ? row.stat : "will",
+        value: Math.max(0, Number(row?.value) || 0),
+        label: String(row?.label || row?.name || "").trim(),
+      }));
   }
 
   function normalizePlannerState(value, fallback) {
@@ -203,6 +303,7 @@
   function normalizeCurrentState(value, fallback) {
     return {
       enabled: Boolean(value?.enabled),
+      collapsed: value?.collapsed === undefined ? fallback.collapsed : Boolean(value.collapsed),
       currentLevel: Number(value?.currentLevel) || fallback.currentLevel,
       className: data.classValues[value?.className] ? value.className : fallback.className,
       stats: Object.assign(zeroVector(), value?.stats || {}),
@@ -321,13 +422,68 @@
   }
 
   function optionList(items, selected) {
-    return items.map((item) => `<option value="${item}" ${item === selected ? "selected" : ""}>${item}</option>`).join("");
+    return items.map((item) => optionTag(item, selected)).join("");
+  }
+
+  function optionTag(value, selected, label) {
+    return `<option value="${escapeHtml(value)}" ${value === selected ? "selected" : ""}>${escapeHtml(label || value)}</option>`;
+  }
+
+  function statShortLabel(stat) {
+    return {
+      strength: "力",
+      technique: "技",
+      agility: "敏",
+      constitution: "体",
+      perception: "感",
+      will: "意",
+    }[stat] || data.statLabels[stat] || stat;
+  }
+
+  function classGrowthLabel(className) {
+    const growth = data.classGrowth?.[className];
+    if (!growth) return className;
+    const parts = heirloomStatOrder()
+      .filter((stat) => Math.abs(Number(growth[stat]) || 0) > 1e-9)
+      .map((stat) => `${statShortLabel(stat)}${calc.formatNumber(growth[stat], 2)}`);
+    return parts.length ? `${className}（${parts.join(" ")}）` : className;
+  }
+
+  function classValueLabel(className) {
+    const values = data.classValues?.[className];
+    if (!values) return className;
+    const parts = heirloomStatOrder()
+      .filter((stat) => Math.abs(Number(values[stat]) || 0) > 1e-9)
+      .map((stat) => `${statShortLabel(stat)}${calc.formatNumber(values[stat], 2)}`);
+    return parts.length ? `${className}（${parts.join(" ")}）` : className;
+  }
+
+  function classOptionLabel(className, mode) {
+    return mode === "values" ? classValueLabel(className) : classGrowthLabel(className);
+  }
+
+  function classOptionList(items, selected, mode = "growth") {
+    const groups = core.groupClassesByCategory(items);
+    if (groups?.length) {
+      return groups.map((category) => `<optgroup label="${category.label}" class="class-group-${category.color}">
+        ${category.availableClasses.map((className) => optionTag(className, selected, classOptionLabel(className, mode))).join("")}
+      </optgroup>`).join("");
+    }
+    return items.map((className) => optionTag(className, selected, classOptionLabel(className, mode))).join("");
   }
 
   function statOptionList(selected) {
     return data.stats
       .map((stat) => `<option value="${stat}" ${stat === selected ? "selected" : ""}>${data.statLabels[stat]}</option>`)
       .join("");
+  }
+
+  function renderAddListButton(action, label) {
+    return `
+      <button type="button" class="add-list-card" data-action="${action}" aria-label="${label}" title="${label}">
+        <span>+</span>
+      </button>
+    `;
   }
 
   function weaponTypes() {
@@ -374,10 +530,13 @@
       renderLimitEvaluator();
       return;
     }
+    if (activeView === "heirloom") {
+      renderHeirloom();
+      return;
+    }
     renderBasics();
-    renderCurrentState();
     renderGrowthPlan();
-    renderTraits();
+    renderCurrentState();
     renderEquipment();
     renderResults();
   }
@@ -385,31 +544,38 @@
   function renderShell() {
     const isPlanner = activeView === "planner";
     const isLimit = activeView === "limit";
+    const isHeirloom = activeView === "heirloom";
+    const isCalculator = !isPlanner && !isLimit && !isHeirloom;
+    const title = isLimit ? "构筑上限评估" : isPlanner ? "成长规划" : isHeirloom ? "传家宝计算" : "成长计算器";
+    const subtitle = isLimit
+      ? "血脉与神子组合强度比较"
+      : isPlanner
+        ? "技能门槛与成长路线调整"
+        : isHeirloom
+          ? "角色成长与职业成长加权分配"
+          : "常态属性与战斗属性";
     $("#app").innerHTML = `
       <header class="topbar">
         <div>
-          <h1>${isLimit ? "构筑上限评估" : "成长计算器"}</h1>
-          <p>${isLimit ? "血脉与神子组合强度比较" : "常态属性与战斗属性"}</p>
+          <h1>${title}</h1>
+          <p>${subtitle}</p>
         </div>
         <div class="topbar-actions">
-          <button class="ghost-button" data-action="load-fala">法拉样例</button>
-          <button class="ghost-button" data-action="load-saved">载入</button>
-          <button class="primary-button" data-action="save">保存</button>
           <span id="statusText" class="status-text"></span>
         </div>
       </header>
-      <main class="workspace ${isPlanner || isLimit ? "planner-workspace" : ""}">
+      <main class="workspace ${isCalculator ? "" : "planner-workspace"}">
         <aside class="rail">
           <div class="rail-mark">成</div>
-          <button class="rail-button ${!isPlanner && !isLimit ? "active" : ""}" data-action="set-view" data-view="calculator">属性</button>
+          <button class="rail-button ${isCalculator ? "active" : ""}" data-action="set-view" data-view="calculator">属性</button>
           <button class="rail-button ${isPlanner ? "active" : ""}" data-action="set-view" data-view="planner">规划</button>
+          <button class="rail-button ${isHeirloom ? "active" : ""}" data-action="set-view" data-view="heirloom">传家宝</button>
           <button class="rail-button ${isLimit ? "active" : ""}" data-action="set-view" data-view="limit">上限</button>
-          ${!isPlanner && !isLimit ? `
+          ${isCalculator ? `
             <div class="rail-divider"></div>
             <a href="#basicPanel">基础</a>
-            <a href="#currentPanel">当前</a>
             <a href="#growthPanel">成长</a>
-            <a href="#traitPanel">特性</a>
+            <a href="#currentPanel">当前</a>
             <a href="#resultPanel">结果</a>
           ` : ""}
         </aside>
@@ -421,12 +587,15 @@
           <section class="limit-column">
             <section id="limitPanel" class="panel"></section>
           </section>
+        ` : isHeirloom ? `
+          <section class="heirloom-column">
+            <section id="heirloomPanel" class="panel"></section>
+          </section>
         ` : `
           <section class="input-column">
             <section id="basicPanel" class="panel"></section>
-            <section id="currentPanel" class="panel"></section>
             <section id="growthPanel" class="panel"></section>
-            <section id="traitPanel" class="panel"></section>
+            <section id="currentPanel" class="panel"></section>
             <section id="gearPanel" class="panel"></section>
           </section>
           <section id="resultPanel" class="result-column"></section>
@@ -440,12 +609,13 @@
     const summary = calc.bloodlineSummary(state);
     const total = calc.bloodlineTotal(state);
     const autoFill = summary.find((row) => row.autoFilled);
+    const basicCollapsed = state.basicPotentialCollapsed === true;
+    const injectedCollapsed = state.injectedPotentialCollapsed !== false;
     $("#basicPanel").innerHTML = `
       <div class="panel-heading">
         <h2>角色基础</h2>
         <div class="panel-actions">
           <button class="small-button" data-action="apply-limit">套用上限</button>
-          <button class="small-button" data-action="add-bloodline">添加血脉</button>
         </div>
       </div>
       <div class="form-grid compact">
@@ -461,12 +631,46 @@
       </div>
       <div class="bloodline-list">
         ${state.bloodlines.map((row, index) => renderBloodlineRow(row, index)).join("")}
+        ${renderAddListButton("add-bloodline", "添加血脉")}
       </div>
       <div class="weighted-note">
         加权结果是当前角色潜力上限；实际角色潜力可低于上限并会参与最终计算。
       </div>
-      <div class="stat-grid">
-        ${data.stats.map((stat) => renderPotentialField(stat, potentialLimit)).join("")}
+      <div class="basic-stat-sections">
+        <section class="basic-stat-box">
+          <div class="subsection-heading">
+            <h3>基础潜力</h3>
+            <button class="small-button" data-action="toggle-basic-potential">${basicCollapsed ? "展开" : "收起"}</button>
+          </div>
+          ${basicCollapsed ? "<p class=\"folded-note\">基础潜力已收起；这里填写实际角色潜力。</p>" : `
+            <div class="stat-grid">
+              ${data.stats.map((stat) => renderPotentialField(stat, potentialLimit)).join("")}
+            </div>
+          `}
+        </section>
+        <section class="basic-stat-box">
+        <div class="subsection-heading">
+          <h3>注入后潜力</h3>
+          <div class="panel-actions">
+            <button class="small-button" data-action="apply-injected-potential">反推基础成长</button>
+            <button class="small-button" data-action="toggle-injected-potential">${injectedCollapsed ? "展开" : "收起"}</button>
+          </div>
+        </div>
+        ${injectedCollapsed ? "<p class=\"folded-note\">注入后潜力已收起；展开后可填写注入神力后的成长值。</p>" : `
+          <div class="weighted-note">
+            填写注入神力后的六维成长值；系统会扣除已选择神技与神子/圣子特性的成长修正，并写回基础潜力。
+          </div>
+          <div class="stat-grid">
+            ${data.stats.map((stat) => `
+              <label class="stat-field">
+                <span>${data.statLabels[stat]}</span>
+                ${numberInput(state.injectedPotential?.[stat] || 0, `data-injected-potential="${stat}"`)}
+                <small>注入后成长值</small>
+              </label>
+            `).join("")}
+          </div>
+        `}
+        </section>
       </div>
       <div class="role-save-row">
         <label>
@@ -476,7 +680,9 @@
         <button class="small-button" data-action="save-role-template">保存角色</button>
         <small>已保存 ${roleTemplates.length} 个角色模板，可在“上限”页批量评估。</small>
       </div>
+      <section id="traitSubPanel" class="trait-subpanel"></section>
     `;
+    renderTraits();
   }
 
   function potentialHint(stat, potentialLimit) {
@@ -513,14 +719,19 @@
 
   function renderCurrentState() {
     const classNames = Object.keys(data.classValues);
+    const collapsed = state.currentState.collapsed !== false;
     $("#currentPanel").innerHTML = `
       <div class="panel-heading">
         <h2>当前状态</h2>
-        <label class="inline-toggle">
-          <input type="checkbox" data-current-enabled ${state.currentState.enabled ? "checked" : ""}>
-          <span>作为规划起点</span>
-        </label>
+        <div class="panel-actions">
+          <label class="inline-toggle">
+            <input type="checkbox" data-current-enabled ${state.currentState.enabled ? "checked" : ""}>
+            <span>作为规划起点</span>
+          </label>
+          <button class="small-button" data-action="toggle-current-panel">${collapsed ? "展开" : "收起"}</button>
+        </div>
       </div>
+      ${collapsed ? "<p class=\"folded-note\">当前状态默认收起；启用后会作为成长规划起点参与反推。</p>" : `
       <div class="weighted-note">
         六维请填写脱下装备后的面板数值；系统会剥离乘区、特性值和当前职业值，反推出当前已有成长值。
       </div>
@@ -531,7 +742,7 @@
         </label>
         <label>
           <span>当前职业</span>
-          <select data-current-field="className">${optionList(classNames, state.currentState.className)}</select>
+          <select data-current-field="className">${classOptionList(classNames, state.currentState.className)}</select>
         </label>
       </div>
       <div class="stat-grid">
@@ -543,6 +754,7 @@
           </label>
         `).join("")}
       </div>
+      `}
     `;
   }
 
@@ -573,7 +785,6 @@
     $("#growthPanel").innerHTML = `
       <div class="panel-heading">
         <h2>成长路线</h2>
-        <button class="small-button" data-action="add-segment">添加区间</button>
       </div>
       <div class="form-grid compact growth-meta">
         <label>
@@ -586,6 +797,7 @@
       </div>
       <div class="segment-list">
         ${state.growthSegments.map((segment, index) => renderSegmentRow(segment, index, classNames, issues[index])).join("")}
+        ${renderAddListButton("add-segment", "添加成长区间")}
       </div>
     `;
   }
@@ -605,12 +817,134 @@
         </label>
         <label class="wide">
           <span>职业成长</span>
-          <select data-segment="${index}" data-segment-field="className">${optionList(classNames, segment.className)}</select>
+          <select data-segment="${index}" data-segment-field="className">${classOptionList(classNames, segment.className)}</select>
         </label>
         <button class="icon-button" title="删除区间" data-action="remove-segment" data-index="${index}">×</button>
         ${hasIssue ? `<div class="segment-warning">${issues.join("；")}</div>` : ""}
       </div>
     `;
+  }
+
+  function renderHeirloom() {
+    const panel = $("#heirloomPanel");
+    const result = calc.calculateHeirloomAttributes(state.heirloom);
+    const classNames = Object.keys(data.classGrowth);
+    const selectedLabel = result.level < 20 ? "2 项" : "3 项";
+    const totalAllocated = result.selectedAllocations.reduce((sum, item) => sum + item.value, 0);
+    panel.innerHTML = `
+      <div class="panel-heading">
+        <h2>传家宝</h2>
+        <div class="panel-actions">
+          <button class="small-button" data-action="apply-heirloom-from-current">套用角色基础</button>
+        </div>
+      </div>
+      <div class="heirloom-layout">
+        <section class="heirloom-block">
+          <div class="form-grid compact heirloom-meta">
+            <label>
+              <span>目标职业</span>
+              <select data-heirloom-field="className">${classOptionList(classNames, state.heirloom.className)}</select>
+            </label>
+            <label>
+              <span>传家宝等级</span>
+              <input type="number" min="0" max="120" step="1" value="${calc.formatNumber(state.heirloom.level, 0)}" data-heirloom-field="level">
+            </label>
+            <div class="heirloom-mode">
+              <span>属性数量</span>
+              <strong>${selectedLabel}</strong>
+              <small>${result.level < 20 ? "低于 20 级" : "20 级及以上"}</small>
+            </div>
+          </div>
+          <div class="stat-grid heirloom-potential-grid">
+            ${heirloomStatOrder().map((stat) => `
+              <label class="stat-field">
+                <span>${data.statLabels[stat]}</span>
+                ${numberInput(state.heirloom.characterPotential[stat], `data-heirloom-potential="${stat}"`)}
+                <small>角色成长值</small>
+              </label>
+            `).join("")}
+          </div>
+        </section>
+        <section class="heirloom-block heirloom-result-block">
+          <div class="heirloom-summary">
+            <div>
+              <span>等级总值</span>
+              <strong>${calc.formatNumber(result.level, 1)}</strong>
+            </div>
+            <div>
+              <span>已分配</span>
+              <strong>${calc.formatNumber(totalAllocated, 1)}</strong>
+            </div>
+            <div>
+              <span>加权总值</span>
+              <strong>${calc.formatNumber(result.totalWeight, 4)}</strong>
+            </div>
+          </div>
+          ${result.warnings.length ? `<ul class="planner-warnings">${result.warnings.map((warning) => `<li>${warning}</li>`).join("")}</ul>` : ""}
+          <div class="heirloom-allocation-list">
+            ${renderHeirloomAllocations(result)}
+          </div>
+        </section>
+        <section class="heirloom-block">
+          <div class="table-wrap">
+            <table class="heirloom-table">
+              <thead>
+                <tr>
+                  <th>属性</th>
+                  <th>角色成长</th>
+                  <th>职业成长</th>
+                  <th>总成长</th>
+                  <th>权重</th>
+                  <th>传家宝属性</th>
+                </tr>
+              </thead>
+              <tbody>${renderHeirloomRows(result)}</tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    `;
+  }
+
+  function renderHeirloomAllocations(result) {
+    if (!result.selectedAllocations.length) {
+      return "<p class=\"folded-note\">暂无可分配属性。</p>";
+    }
+    return result.selectedAllocations.map((item) => {
+      const width = result.level > 0 ? Math.max(0, Math.min(100, item.value / result.level * 100)) : 0;
+      return `
+        <article class="heirloom-allocation-card">
+          <div class="heirloom-allocation-head">
+            <strong>${data.statLabels[item.stat]}</strong>
+            <span>${calc.formatNumber(item.value, 1)}</span>
+          </div>
+          <div class="heirloom-allocation-track">
+            <div class="heirloom-allocation-fill" style="width: ${width}%"></div>
+          </div>
+          <div class="heirloom-allocation-meta">
+            <span>总成长 ${calc.formatNumber(item.totalGrowth, 4)}</span>
+            <span>权重 ${calc.formatNumber(item.weight * 100, 1)}%</span>
+          </div>
+        </article>
+      `;
+    }).join("");
+  }
+
+  function renderHeirloomRows(result) {
+    const byStat = Object.fromEntries(result.allocations.map((item) => [item.stat, item]));
+    return heirloomStatOrder().map((stat) => {
+      const item = byStat[stat];
+      return `
+        <tr class="${item.selected ? "heirloom-selected-row" : ""}">
+          <th>${data.statLabels[stat]}</th>
+          <td>${calc.formatNumber(item.characterPotential, 4)}</td>
+          <td>${calc.formatNumber(item.classGrowth, 4)}</td>
+          <td>${calc.formatNumber(item.totalGrowth, 4)}</td>
+          <td>${item.selected ? `${calc.formatNumber(item.weight * 100, 1)}%` : "-"}</td>
+          <td>${item.selected ? calc.formatNumber(item.value, 1) : "-"}</td>
+        </tr>
+      `;
+    }).join("");
   }
 
   function traitTypeLabel(type) {
@@ -632,26 +966,146 @@
     return selectedTraits().find((trait) => trait.type === "divine_skill") || null;
   }
 
+  function saintTraitGroup(trait) {
+    return core.saintTraitGroup(data, trait);
+  }
+
+  function saintTraitGroups() {
+    return core.getSaintTraitGroups(data).map((group) => ({
+      ...group,
+      items: group.traitIds
+        .map((id) => data.traits.find((trait) => trait.id === id))
+        .filter(Boolean),
+    }));
+  }
+
+  function availableDivineRacesForState() {
+    return core.availableDivineRaces(data, state);
+  }
+
+  function allowedMortalRacesForState() {
+    return core.allowedMortalRaces(data, state);
+  }
+
+  function parseHybridTraitName(name) {
+    const parsed = core?.parseHybridTraitName?.(name);
+    if (parsed) {
+      return {
+        name: parsed.displayName,
+        prerequisiteName: parsed.prerequisiteName,
+        suffixRace: parsed.suffixRace,
+      };
+    }
+    const match = String(name || "").match(/^(.+?)（(.+?)）([^（）]*)$/);
+    if (!match) return null;
+    return {
+      name: match[1],
+      prerequisiteName: match[2],
+      suffixRace: match[3].trim(),
+    };
+  }
+
+  function displayTraitName(trait) {
+    return core?.displayTraitName?.(data, trait) || parseHybridTraitName(trait.name)?.name || trait.name;
+  }
+
+  function prerequisiteForTrait(trait) {
+    const coreRequirements = core?.traitPrerequisites?.(data, trait);
+    if (Array.isArray(coreRequirements) && coreRequirements.length) {
+      const traitRequirement = coreRequirements.find((item) => item.kind === "trait");
+      const bloodlineRequirement = coreRequirements.find((item) => item.kind === "bloodlineRace");
+      if (traitRequirement?.traitId?.startsWith("missing:")) {
+        return {
+          label: traitRequirement.traitId.slice("missing:".length),
+          race: bloodlineRequirement?.race || "",
+          traitId: "",
+          missing: true,
+        };
+      }
+      const mortal = data.traits.find((item) => item.id === traitRequirement?.traitId);
+      return {
+        label: mortal?.name || traitRequirement?.traitId || "",
+        race: bloodlineRequirement?.race || mortal?.race || "",
+        traitId: traitRequirement?.traitId || "",
+        missing: !mortal,
+      };
+    }
+    if (trait.type !== "divine_trait") return null;
+    const parsed = parseHybridTraitName(trait.name);
+    if (!parsed) return null;
+    const mortal = data.traits.find((item) => item.type === "mortal_trait" && item.name === parsed.prerequisiteName);
+    return {
+      label: parsed.prerequisiteName,
+      race: mortal?.race || parsed.suffixRace || "",
+      traitId: mortal?.id || "",
+      missing: !mortal,
+    };
+  }
+
+  function hasBloodlineTraitRace(race) {
+    if (!race) return false;
+    return core.hasBloodlineTraitRace(data, state, race);
+  }
+
+  function traitSelectionDisabledReason(trait) {
+    return traitSelectionDetails(trait).disabledReason;
+  }
+
+  function overriddenMortalTraitIds() {
+    const overridden = core?.overriddenMortalTraits?.(selectedTraits()) || [];
+    return new Set(overridden.map((trait) => trait.id));
+  }
+
+  function traitSelectionDetails(trait) {
+    const availability = core.getTraitSelectionAvailability(data, state, trait.id);
+    return {
+      disabledReason: availability.available ? "" : availability.reasons.map((reason) => reason.message).join("；"),
+      warningReason: (availability.warnings || []).map((warning) => warning.message).join("；"),
+      overridden: overriddenMortalTraitIds().has(trait.id),
+    };
+  }
+
+  function traitPrerequisiteMetForIds(trait, traitIds) {
+    const availability = core.getTraitAvailability(data, Object.assign({}, state, { traitIds }), trait.id);
+    if (availability) return availability.available;
+    const prerequisite = prerequisiteForTrait(trait);
+    if (!prerequisite) return true;
+    return !prerequisite.missing
+      && hasBloodlineTraitRace(prerequisite.race)
+      && traitIds.includes(prerequisite.traitId);
+  }
+
   function renderTraits() {
     sanitizeTraits();
+    const panel = $("#traitSubPanel");
+    if (!panel) return;
     const selected = selectedTraits();
     const selectedSkill = selectedDivineSkill();
+    const collapsed = state.traitsCollapsed !== false;
     const visibleDivineRaces = selectedSkill
       ? [selectedSkill.race]
-      : calc.availableDivineRaces(state);
-    const mortalRaces = calc.allowedMortalRaces(state);
-    $("#traitPanel").innerHTML = `
-      <div class="panel-heading">
+      : availableDivineRacesForState();
+    const mortalRaces = allowedMortalRacesForState();
+    panel.innerHTML = `
+      <div class="subsection-heading trait-subpanel-heading">
         <h2>特性选择</h2>
-        <button class="small-button" data-action="clear-traits">清空</button>
+        <div class="panel-actions">
+          ${collapsed ? "" : "<button class=\"small-button\" data-action=\"clear-traits\">清空</button>"}
+          <button class="small-button" data-action="toggle-traits-panel">${collapsed ? "展开" : "收起"}</button>
+        </div>
       </div>
       <div id="selectedTraits" class="selected-traits">
-        ${selected.length ? selected.map((trait) => `<span>${trait.name}</span>`).join("") : "<em>未选择</em>"}
+        ${selected.length ? selected.map((trait) => {
+          const overridden = overriddenMortalTraitIds().has(trait.id);
+          return `<span class="${overridden ? "overridden" : ""}" title="${overridden ? "被同部位神子特性覆盖，计算时不生效" : ""}">${trait.name}</span>`;
+        }).join("") : "<em>未选择</em>"}
       </div>
-      <div class="trait-groups">
+      ${collapsed ? "<p class=\"folded-note\">特性选择已收起；上方保留当前已选特性。</p>" : `
+        <div class="trait-groups">
         ${visibleDivineRaces.map((race) => renderDivineGroup(race)).join("")}
         ${mortalRaces.map((race) => renderMortalGroup(race)).join("")}
-      </div>
+        </div>
+      `}
     `;
   }
 
@@ -663,6 +1117,44 @@
     const dependentType = race === "圣子" ? "saint_trait" : "divine_trait";
     const dependentTraits = data.traits.filter((trait) => trait.type === dependentType && trait.race === race);
     const selectedDependentCount = dependentTraits.filter((trait) => state.traitIds.includes(trait.id)).length;
+    const renderDependentOptions = () => {
+      if (race === "圣子") {
+        const groups = saintTraitGroups().map((group) => ({
+          label: `${group.label}特性 ${group.maxSelected}/${group.items.length}`,
+          items: group.items,
+          group: group.label,
+        }));
+        return groups.map((group) => {
+          const selectedInGroup = group.items.filter((trait) => state.traitIds.includes(trait.id)).length;
+          return `
+            <div class="choice-block">
+              <h3>${group.label}${selectedInGroup ? " · 已选 1" : ""}</h3>
+              ${group.items.map((trait) => {
+                const details = traitSelectionDetails(trait);
+                return renderTraitOption(trait, "checkbox", "trait-id", Boolean(details.disabledReason), details.disabledReason, details.warningReason, details.overridden);
+              }).join("")}
+            </div>
+          `;
+        }).join("");
+      }
+      return `
+        <div class="choice-block">
+          <h3>神子特性 ${selectedDependentCount}/2</h3>
+          ${dependentTraits.map((trait) => {
+            const details = traitSelectionDetails(trait);
+            return renderTraitOption(
+              trait,
+              "checkbox",
+              "trait-id",
+              Boolean(details.disabledReason),
+              details.disabledReason,
+              details.warningReason,
+              details.overridden
+            );
+          }).join("")}
+        </div>
+      `;
+    };
     return `
       <section class="trait-group ${active ? "active" : ""}">
         <div class="trait-group-header">
@@ -681,15 +1173,7 @@
               <h3>神技</h3>
               ${skills.map((trait) => renderTraitOption(trait, "radio", "divine-skill", false)).join("")}
             </div>
-            <div class="choice-block">
-              <h3>${race === "圣子" ? "圣子特性" : "神子特性"} ${selectedDependentCount}/2</h3>
-              ${dependentTraits.map((trait) => renderTraitOption(
-                trait,
-                "checkbox",
-                "trait-id",
-                !state.traitIds.includes(trait.id) && selectedDependentCount >= 2
-              )).join("")}
-            </div>
+            ${renderDependentOptions()}
           </div>
         ` : ""}
       </section>
@@ -711,28 +1195,31 @@
           <button class="collapse-button" data-action="toggle-trait-group" data-group-type="mortal" data-race="${race}">${collapsed ? "展开" : "收起"}</button>
         </div>
         ${collapsed ? "" : `<div class="trait-group-body">
-          ${traits.map((trait) => renderTraitOption(
-            trait,
-            "checkbox",
-            "trait-id",
-            !state.traitIds.includes(trait.id) && totalMortalCount >= 3
-          )).join("")}
+          ${traits.map((trait) => {
+            const details = traitSelectionDetails(trait);
+            return renderTraitOption(trait, "checkbox", "trait-id", Boolean(details.disabledReason), details.disabledReason, details.warningReason, details.overridden);
+          }).join("")}
         </div>`}
       </section>
     `;
   }
 
-  function renderTraitOption(trait, inputType, dataKey, disabled) {
+  function renderTraitOption(trait, inputType, dataKey, disabled, disabledReason = "", warningReason = "", overridden = false) {
     const checked = state.traitIds.includes(trait.id) ? "checked" : "";
     const disabledAttr = disabled ? "disabled" : "";
     const attr = dataKey === "divine-skill" ? `data-divine-skill="${trait.id}"` : `data-trait-id="${trait.id}"`;
+    const prerequisite = prerequisiteForTrait(trait);
     return `
-      <label class="trait-option ${disabled ? "disabled" : ""}">
+      <label class="trait-option ${disabled ? "disabled" : ""} ${warningReason ? "warning" : ""} ${overridden ? "overridden" : ""}">
         <input type="${inputType}" name="${dataKey}" ${attr} ${checked} ${disabledAttr}>
         <span>
-          <strong>${trait.name}</strong>
+          <strong>${displayTraitName(trait)}</strong>
           <small>${traitTypeLabel(trait.type)} · 部位：${trait.part || "无"} · 寿命：${trait.lifespanText || "未录入"}</small>
-          <em>${trait.effectText || describeTraitEffect(trait)}</em>
+          ${prerequisite ? `<small class="trait-prerequisite">前置：${prerequisite.label}${prerequisite.race ? ` · ${prerequisite.race}` : ""}</small>` : ""}
+          ${disabledReason ? `<small class="trait-disabled-reason">${disabledReason}</small>` : ""}
+          ${warningReason ? `<small class="trait-warning-reason">${warningReason}</small>` : ""}
+          ${overridden ? "<small class=\"trait-overridden-reason\">已被同部位神子特性覆盖，计算时不生效</small>" : ""}
+          <em>${trait.type === "divine_skill" ? describeTraitEffect(trait) : (trait.effectText || describeTraitEffect(trait))}</em>
         </span>
         ${renderPotentialChips(trait)}
       </label>
@@ -758,6 +1245,10 @@
   }
 
   function describeTraitEffect(trait) {
+    if (trait.type === "divine_skill") {
+      const divine = vectorText(trait.divineCombatValue, "/级");
+      return divine ? `战斗加成：${divine}` : "神技战斗加成未录入";
+    }
     const parts = [];
     const flat = vectorText(trait.flatStats, "");
     const multiplier = vectorText(trait.multiplierStats, "%", 100);
@@ -778,7 +1269,7 @@
       </div>
       <label class="single-field">
         <span>最终职业</span>
-        <select data-field="finalClass">${optionList(finalClassNames, state.finalClass)}</select>
+        <select data-field="finalClass">${classOptionList(finalClassNames, state.finalClass, "values")}</select>
       </label>
       <div class="stat-grid">
         ${data.stats.map((stat) => `
@@ -799,21 +1290,19 @@
     panel.innerHTML = `
       <div class="panel-heading">
         <h2>技能门槛规划</h2>
-        <div class="panel-actions">
-          <button class="small-button" data-action="add-planner-target">添加门槛</button>
-          <button class="small-button" data-action="add-gear-set">增加属性套装</button>
-        </div>
       </div>
       <div class="planner-block">
         <h3>目标门槛</h3>
         <div class="target-list">
           ${state.planner.targets.map((target, index) => renderPlannerTarget(target, index)).join("")}
+          ${renderAddListButton("add-planner-target", "添加门槛")}
         </div>
       </div>
       <div class="planner-block">
         <h3>属性套装</h3>
         <div class="gear-set-list">
           ${state.planner.gearSets.map((gearSet, index) => renderGearSet(gearSet, index)).join("")}
+          ${renderAddListButton("add-gear-set", "增加属性套装")}
         </div>
       </div>
       <div class="planner-block">
@@ -996,6 +1485,7 @@
     const panel = $("#limitPanel");
     if (!panel) return;
     const limit = state.limitEvaluator;
+    const constraints = normalizeLimitConstraints(limit.constraints);
     panel.innerHTML = `
       <div class="panel-heading">
         <div>
@@ -1008,40 +1498,48 @@
       </div>
       <div class="limit-layout">
         <section class="limit-block">
-          <h3>全局场景</h3>
-          <div class="form-grid">
-            <label>
-              <span>性别</span>
-              <select data-field="sex">${optionList(["女", "男"], state.sex)}</select>
-            </label>
-            <label>
-              <span>目标等级</span>
-              <input type="number" min="1" max="999" step="1" value="${state.level}" data-field="level">
-            </label>
-            <label>
-              <span>最终职业</span>
-              <select data-field="finalClass">${optionList(Object.keys(data.classValues), state.finalClass)}</select>
-            </label>
-            <label>
-              <span>最终装备总负重</span>
-              <input type="number" min="0" step="0.1" value="${calc.formatNumber(limit.equipmentWeight, 2)}" data-limit-field="equipmentWeight">
-            </label>
-            <div class="limit-auto-card">
-              <span>系统采样</span>
-              <strong>下轮 ${limit.sampleCount} 次</strong>
-              <small>第 ${limit.evaluationRound + 1} 轮，种子自动滚动</small>
-            </div>
-            <div class="limit-auto-card">
-              <span>上次耗时</span>
-              <strong>${limit.lastDurationMs ? `${calc.formatNumber(limit.lastDurationMs, 0)} ms` : "尚无"}</strong>
-              <small>样本量会随耗时自动调整</small>
-            </div>
+          <div class="limit-block-head">
+            <h3>全局场景</h3>
           </div>
-          <div class="limit-toggle-row">
-            <label class="check-pill">
-              <input type="checkbox" data-limit-toggle="usePlannerTargets" ${limit.usePlannerTargets ? "checked" : ""}>
-              <span>使用规划页技能门槛</span>
-            </label>
+          <div class="limit-global-grid">
+            <div class="form-grid">
+              <label>
+                <span>性别</span>
+                <select data-field="sex">${optionList(["女", "男"], state.sex)}</select>
+              </label>
+              <label>
+                <span>目标等级</span>
+                <input type="number" min="1" max="999" step="1" value="${state.level}" data-field="level">
+              </label>
+              <label>
+                <span>最终职业</span>
+                <select data-field="finalClass">${classOptionList(Object.keys(data.classValues), state.finalClass)}</select>
+              </label>
+              <label>
+                <span>最终装备总负重</span>
+                <input type="number" min="0" step="0.1" value="${calc.formatNumber(limit.equipmentWeight, 2)}" data-limit-field="equipmentWeight">
+              </label>
+              <div class="limit-auto-card">
+                <span>系统采样</span>
+                <strong>下轮 ${limit.sampleCount} 次</strong>
+                <small>第 ${limit.evaluationRound + 1} 轮，种子自动滚动</small>
+              </div>
+              <div class="limit-auto-card">
+                <span>上次耗时</span>
+                <strong>${limit.lastDurationMs ? `${calc.formatNumber(limit.lastDurationMs, 0)} ms` : "尚无"}</strong>
+                <small>样本量会随耗时自动调整</small>
+              </div>
+            </div>
+            <div class="limit-constraint-panel">
+              <div class="limit-block-head">
+                <h3>硬约束</h3>
+                <button class="small-button" data-action="append-planner-targets">使用规划页技能门槛</button>
+              </div>
+              <div class="constraint-list">
+                ${constraints.map((constraint, index) => renderLimitConstraint(constraint, index)).join("")}
+                ${renderAddListButton("add-limit-constraint", "添加约束")}
+              </div>
+            </div>
           </div>
         </section>
         <section class="limit-block">
@@ -1089,7 +1587,7 @@
               </label>
             `).join("")}
           </div>
-          <p class="planner-sort-note">权重只影响评分排序；负重和技能门槛会作为硬约束参与搜索。</p>
+          <p class="planner-sort-note">权重只影响评分排序；负重和硬约束会参与搜索。</p>
         </section>
         <section class="limit-block">
           <h3>最终装备六维</h3>
@@ -1104,6 +1602,23 @@
         </section>
       </div>
       <div id="limitOutput">${renderLimitOutput(limit.result)}</div>
+    `;
+  }
+
+  function renderLimitConstraint(constraint, index) {
+    return `
+      <div class="constraint-row">
+        <label>
+          <span>属性类型</span>
+          <select data-limit-constraint="${index}" data-limit-constraint-field="stat">${statOptionList(constraint.stat)}</select>
+        </label>
+        <label>
+          <span>约束值</span>
+          <input type="number" min="0" step="1" value="${calc.formatNumber(constraint.value, 2)}" data-limit-constraint="${index}" data-limit-constraint-field="value">
+        </label>
+        <button class="icon-button" title="删除约束" data-action="remove-limit-constraint" data-index="${index}">×</button>
+        ${constraint.label ? `<small>${escapeHtml(constraint.label)}</small>` : ""}
+      </div>
     `;
   }
 
@@ -1403,6 +1918,140 @@
     `;
   }
 
+  function selectedInjectionPotentialBonus() {
+    const result = zeroVector();
+    selectedTraits()
+      .filter((trait) => trait.type === "divine_skill" || trait.type === "divine_trait" || trait.type === "saint_trait")
+      .forEach((trait) => {
+      data.stats.forEach((stat) => {
+        result[stat] += Number(trait.potentialBonus?.[stat]) || 0;
+      });
+    });
+    return result;
+  }
+
+  function renderAttributeBars(normalStats, combatStats) {
+    const max = 900;
+    return data.stats.map((stat) => {
+      const normal = Math.max(0, Number(normalStats[stat]) || 0);
+      const combat = Math.max(0, Number(combatStats[stat]) || 0);
+      const normalWidth = Math.min(100, normal / max * 100);
+      const combatWidth = Math.min(100, combat / max * 100);
+      const combatDeltaWidth = Math.max(0, combatWidth - normalWidth);
+      const combatLabelLeft = Math.min(96, Math.max(normalWidth, combatWidth) + 1.2);
+      const showNormalValue = Math.abs(normal - combat) > 0.05;
+      return `
+        <div class="attribute-bar-row">
+          <span class="attribute-bar-name">${data.statLabels[stat]}</span>
+          <div class="attribute-bar-track" aria-label="${data.statLabels[stat]} 常态 ${calc.formatNumber(normal, 2)} 战斗 ${calc.formatNumber(combat, 2)}">
+            <div class="attribute-bar-fill normal" style="width: ${normalWidth}%">
+              ${showNormalValue ? `<span>${calc.formatNumber(normal, 1)}</span>` : ""}
+            </div>
+            ${combatDeltaWidth > 0.05 ? `<div class="attribute-bar-fill combat-delta" style="left: ${normalWidth}%; width: ${combatDeltaWidth}%"></div>` : ""}
+            <span class="attribute-bar-combat-value" style="left: ${combatLabelLeft}%">${calc.formatNumber(combat, 1)}</span>
+          </div>
+        </div>
+      `;
+    }).join("");
+  }
+
+  function radarPoint(cx, cy, radius, index) {
+    const angles = [-120, -180, -240, -300, 0, -60];
+    const angle = angles[index] * Math.PI / 180;
+    return {
+      x: cx + Math.cos(angle) * radius,
+      y: cy + Math.sin(angle) * radius,
+    };
+  }
+
+  function renderGrowthRadar(result) {
+    const radarStats = ["strength", "technique", "agility", "will", "perception", "constitution"];
+    const width = 520;
+    const height = 360;
+    const cx = width / 2;
+    const cy = height / 2;
+    const radius = 96;
+    const max = 0.95;
+    const grid = [1, 0.75, 0.5, 0.25].map((scale) => {
+      const points = radarStats.map((_, index) => {
+        const point = radarPoint(cx, cy, radius * scale, index);
+        return `${point.x},${point.y}`;
+      }).join(" ");
+      return `<polygon points="${points}" class="radar-grid-poly"></polygon>`;
+    }).join("");
+    const spokes = radarStats.map((_, index) => {
+      const point = radarPoint(cx, cy, radius, index);
+      return `<line x1="${cx}" y1="${cy}" x2="${point.x}" y2="${point.y}" class="radar-spoke"></line>`;
+    }).join("");
+    const areaPoints = radarStats.map((stat, index) => {
+      const value = Math.max(0, Number(result.finalCharacterPotential[stat]) || 0);
+      const point = radarPoint(cx, cy, radius * Math.min(1, value / max), index);
+      return `${point.x},${point.y}`;
+    }).join(" ");
+    const overflowScale = 0.8;
+    const overflowItems = radarStats
+      .map((stat, index) => ({
+        stat,
+        index,
+        value: Math.max(0, Number(result.finalCharacterPotential[stat]) || 0),
+      }))
+      .filter((item) => item.value > max);
+    const overflowLayer = (() => {
+      if (!overflowItems.length) return "";
+      if (overflowItems.length === 1) {
+        const item = overflowItems[0];
+        const ratio = Math.min(1, Math.max(0, (item.value - max) / overflowScale));
+        const tip = radarPoint(cx, cy, radius * ratio, item.index);
+        const shoulder = radarPoint(cx, cy, radius * Math.min(ratio * 0.55, 0.34), item.index);
+        const dx = tip.x - cx;
+        const dy = tip.y - cy;
+        const length = Math.max(1, Math.hypot(dx, dy));
+        const px = -dy / length;
+        const py = dx / length;
+        const shoulderWidth = 7 + ratio * 6;
+        const points = [
+          `${shoulder.x + px * shoulderWidth},${shoulder.y + py * shoulderWidth}`,
+          `${tip.x},${tip.y}`,
+          `${shoulder.x - px * shoulderWidth},${shoulder.y - py * shoulderWidth}`,
+          `${cx},${cy}`,
+        ].join(" ");
+        return `<polygon points="${points}" class="radar-overflow-pointer"></polygon>`;
+      }
+      const overflowPoints = radarStats.map((stat, index) => {
+        const value = Math.max(0, Number(result.finalCharacterPotential[stat]) || 0);
+        const ratio = Math.min(1, Math.max(0, (value - max) / overflowScale));
+        const point = radarPoint(cx, cy, radius * ratio, index);
+        return `${point.x},${point.y}`;
+      }).join(" ");
+      return `<polygon points="${overflowPoints}" class="radar-overflow-area"></polygon>`;
+    })();
+    const labels = radarStats.map((stat, index) => {
+      const value = Number(result.finalCharacterPotential[stat]) || 0;
+      const rating = potentialRating(value);
+      const point = radarPoint(cx, cy, radius + 70, index);
+      const anchor = point.x < cx - 10 ? "end" : point.x > cx + 10 ? "start" : "middle";
+      return `
+        <g class="radar-label rating-text-${rating.tone}" transform="translate(${point.x} ${point.y})">
+          <text text-anchor="${anchor}" class="radar-label-name">${data.statLabels[stat]} ${rating.label}</text>
+          <text text-anchor="${anchor}" y="22" class="radar-label-value">${calc.formatNumber(value, 4)}</text>
+        </g>
+      `;
+    }).join("");
+    return `
+      <div class="radar-wrap">
+        <svg class="growth-radar" viewBox="0 0 ${width} ${height}" role="img" aria-label="角色最终成长值雷达图">
+          <rect width="${width}" height="${height}" rx="10" class="radar-bg" fill="#252b2a"></rect>
+          ${grid}
+          ${spokes}
+          <polygon points="${areaPoints}" class="radar-area" fill="rgba(229, 164, 38, 0.72)" stroke="rgba(255, 216, 121, 0.95)" stroke-width="2"></polygon>
+          <polygon points="${areaPoints}" class="radar-edge" fill="none" stroke="rgba(116, 73, 0, 0.55)" stroke-width="1"></polygon>
+          ${overflowLayer}
+          ${labels}
+        </svg>
+      </div>
+    `;
+  }
+
   function renderResults() {
     const result = calc.calculateGrowth(state);
     const rows = data.stats.map((stat) => {
@@ -1427,7 +2076,7 @@
     const formulas = data.stats.map((stat) => {
       const item = result.breakdown[stat];
       return `
-        <details ${stat === "technique" || stat === "agility" ? "open" : ""}>
+        <details>
           <summary>${data.statLabels[stat]}</summary>
           <div class="formula-grid">
             <span>血脉潜力</span><strong>${calc.formatNumber(item.bloodlinePotential, 4)}</strong>
@@ -1443,22 +2092,28 @@
     }).join("");
 
     $("#resultPanel").innerHTML = `
-      <section class="result-card summary-card">
+      <section class="result-card attribute-card">
         <div class="panel-heading">
-          <h2>常态属性</h2>
+          <h2>属性进度条</h2>
+          <div class="bar-legend">
+            <span><i class="legend-normal"></i>常态</span>
+            <span><i class="legend-combat"></i>战斗态</span>
+          </div>
         </div>
-        <div class="result-grid">${statCells(result.normalStats)}</div>
+        <div class="attribute-bars">${renderAttributeBars(result.normalStats, result.combatStats)}</div>
       </section>
-      <section class="result-card combat-card">
+      <section class="result-card radar-card">
         <div class="panel-heading">
-          <h2>战斗属性</h2>
+          <h2>人物总潜力</h2>
         </div>
-        <div class="result-grid">${statCells(result.combatStats)}</div>
+        ${renderGrowthRadar(result)}
       </section>
-      <section class="result-card">
+      <section class="result-card breakdown-card">
         <div class="panel-heading">
           <h2>属性拆解</h2>
+          <button class="small-button" data-action="toggle-breakdown-panel">${state.breakdownCollapsed ? "展开" : "收起"}</button>
         </div>
+        ${state.breakdownCollapsed ? "<p class=\"folded-note\">属性拆解已收起，展开后可查看人物潜力、成长值、神技加值、装备和公式来源。</p>" : `
         <div class="table-wrap">
           <table>
             <thead>
@@ -1479,6 +2134,7 @@
             <tbody>${rows}</tbody>
           </table>
         </div>
+        `}
       </section>
       <section class="result-card formula-card">
         <div class="panel-heading">
@@ -1498,8 +2154,8 @@
   }
 
   function sanitizeTraits() {
-    const availableDivines = calc.availableDivineRaces(state);
-    const allowedMortals = calc.allowedMortalRaces(state);
+    const availableDivines = availableDivineRacesForState();
+    const allowedMortals = allowedMortalRacesForState();
     const current = state.traitIds
       .map((id) => data.traits.find((trait) => trait.id === id))
       .filter(Boolean);
@@ -1509,10 +2165,22 @@
     if (divineSkill) {
       next.push(divineSkill.id);
       const dependentType = divineSkill.race === "圣子" ? "saint_trait" : "divine_trait";
-      current
-        .filter((trait) => trait.type === dependentType && trait.race === divineSkill.race)
-        .slice(0, 2)
-        .forEach((trait) => next.push(trait.id));
+      if (divineSkill.race === "圣子") {
+        const byGroup = new Set();
+        current
+          .filter((trait) => trait.type === dependentType && trait.race === divineSkill.race)
+          .forEach((trait) => {
+            const group = saintTraitGroup(trait);
+            if (!group || byGroup.has(group)) return;
+            byGroup.add(group);
+            next.push(trait.id);
+          });
+      } else {
+        current
+          .filter((trait) => trait.type === dependentType && trait.race === divineSkill.race)
+          .slice(0, 2)
+          .forEach((trait) => next.push(trait.id));
+      }
     }
 
     current
@@ -1520,7 +2188,11 @@
       .slice(0, 3)
       .forEach((trait) => next.push(trait.id));
 
-    state.traitIds = [...new Set(next)];
+    const unique = [...new Set(next)];
+    state.traitIds = unique.filter((id) => {
+      const trait = data.traits.find((item) => item.id === id);
+      return !trait || traitPrerequisiteMetForIds(trait, unique);
+    });
   }
 
   function selectDivineGroup(race) {
@@ -1554,12 +2226,116 @@
     render();
   }
 
+  function rememberInputDraft(target) {
+    if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return false;
+    const numberValue = () => Number(target.value) || 0;
+
+    if (target.matches("[data-equipment]")) {
+      state.equipmentStats[target.dataset.equipment] = numberValue();
+      return true;
+    }
+    if (target.matches("[data-potential]")) {
+      state.characterPotential[target.dataset.potential] = numberValue();
+      return true;
+    }
+    if (target.matches("[data-injected-potential]")) {
+      state.injectedPotential[target.dataset.injectedPotential] = numberValue();
+      return true;
+    }
+    if (target.matches("[data-current-field]")) {
+      const field = target.dataset.currentField;
+      if (field === "currentLevel") {
+        state.currentState.currentLevel = Number(target.value) || 1;
+        return true;
+      }
+    }
+    if (target.matches("[data-current-stat]")) {
+      state.currentState.stats[target.dataset.currentStat] = numberValue();
+      return true;
+    }
+    if (target.matches("[data-heirloom-field]")) {
+      const field = target.dataset.heirloomField;
+      if (field === "level") {
+        state.heirloom.level = clampHeirloomLevel(target.value);
+        return true;
+      }
+    }
+    if (target.matches("[data-heirloom-potential]")) {
+      state.heirloom.characterPotential[target.dataset.heirloomPotential] = numberValue();
+      return true;
+    }
+    if (target.matches("[data-field='level']")) {
+      state.level = Number(target.value) || 1;
+      return true;
+    }
+    if (target.matches("[data-segment-field]")) {
+      const index = Number(target.dataset.segment);
+      const field = target.dataset.segmentField;
+      if (state.growthSegments[index] && field !== "className") {
+        state.growthSegments[index][field] = Number(target.value) || 1;
+        return true;
+      }
+    }
+    if (target.matches("[data-gear-field]")) {
+      const index = Number(target.dataset.gearSet);
+      const gearSet = state.planner.gearSets[index];
+      if (gearSet && target.dataset.gearField === "name") {
+        gearSet.name = target.value.trim();
+        return true;
+      }
+    }
+    if (target.matches("[data-gear-stat]")) {
+      const index = Number(target.dataset.gearSet);
+      const gearSet = state.planner.gearSets[index];
+      if (gearSet) {
+        gearSet[target.dataset.gearPiece].stats[target.dataset.gearStat] = numberValue();
+        return true;
+      }
+    }
+    if (target.matches("[data-limit-field]")) {
+      const field = target.dataset.limitField;
+      if (field === "equipmentWeight") {
+        state.limitEvaluator.equipmentWeight = numberValue();
+        return true;
+      }
+    }
+    if (target.matches("[data-limit-constraint-field]")) {
+      const index = Number(target.dataset.limitConstraint);
+      const field = target.dataset.limitConstraintField;
+      const constraint = state.limitEvaluator.constraints?.[index];
+      if (constraint && field === "value") {
+        constraint.value = Math.max(0, numberValue());
+        return true;
+      }
+    }
+    if (target.matches("[data-limit-weight]")) {
+      state.limitEvaluator.targetWeights[target.dataset.limitWeight] = Math.max(0, numberValue());
+      return true;
+    }
+    if (target.matches("[data-role-template-name]")) {
+      roleTemplateDraftName = target.value.trim();
+      return true;
+    }
+    if (target.matches("[data-planner-target-field]")) {
+      const index = Number(target.dataset.plannerTarget);
+      const field = target.dataset.plannerTargetField;
+      const targetRow = state.planner.targets[index];
+      if (targetRow) {
+        targetRow[field] = field === "value" ? numberValue() : target.value.trim();
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   document.addEventListener("click", (event) => {
     const actionNode = event.target.closest("[data-action]");
     const action = actionNode?.dataset.action;
     if (!action) return;
+    rememberStateSoon();
     if (action === "set-view") {
-      activeView = ["planner", "limit"].includes(actionNode.dataset.view) ? actionNode.dataset.view : "calculator";
+      activeView = ["planner", "limit", "heirloom"].includes(actionNode.dataset.view) ? actionNode.dataset.view : "calculator";
       render();
       return;
     }
@@ -1579,6 +2355,56 @@
       renderBasics();
       renderPlanner();
       renderResults();
+    }
+    if (action === "apply-injected-potential") {
+      const dependentTraits = selectedTraits().filter((trait) => trait.type === "divine_trait" || trait.type === "saint_trait");
+      if (!dependentTraits.length) {
+        flashStatus("请先选择神子特性");
+        return;
+      }
+      const traitPotential = selectedInjectionPotentialBonus();
+      data.stats.forEach((stat) => {
+        state.characterPotential[stat] = (Number(state.injectedPotential?.[stat]) || 0) - traitPotential[stat];
+      });
+      clearLimitComparison();
+      renderBasics();
+      renderPlanner();
+      renderResults();
+      flashStatus("已反推基础成长");
+    }
+    if (action === "apply-heirloom-from-current") {
+      state.heirloom.characterPotential = cloneStatVector(calc.calculateGrowth(state).finalCharacterPotential);
+      if (data.classGrowth[state.finalClass]) {
+        state.heirloom.className = state.finalClass;
+      }
+      renderHeirloom();
+      flashStatus("已套用");
+      return;
+    }
+    if (action === "toggle-current-panel") {
+      state.currentState.collapsed = state.currentState.collapsed === false;
+      renderCurrentState();
+      return;
+    }
+    if (action === "toggle-breakdown-panel") {
+      state.breakdownCollapsed = !state.breakdownCollapsed;
+      renderResults();
+      return;
+    }
+    if (action === "toggle-basic-potential") {
+      state.basicPotentialCollapsed = !state.basicPotentialCollapsed;
+      renderBasics();
+      return;
+    }
+    if (action === "toggle-injected-potential") {
+      state.injectedPotentialCollapsed = !state.injectedPotentialCollapsed;
+      renderBasics();
+      return;
+    }
+    if (action === "toggle-traits-panel") {
+      state.traitsCollapsed = !state.traitsCollapsed;
+      renderTraits();
+      return;
     }
     if (action === "remove-bloodline") {
       const index = Number(actionNode.dataset.index);
@@ -1696,6 +2522,43 @@
       clearLimitComparison();
       renderPlanner();
     }
+    if (action === "add-limit-constraint") {
+      const used = new Set((state.limitEvaluator.constraints || []).map((constraint) => constraint.stat));
+      const stat = data.stats.find((item) => !used.has(item)) || "will";
+      state.limitEvaluator.constraints = [
+        ...(state.limitEvaluator.constraints || []),
+        { id: `constraint-${Date.now()}`, stat, value: 90, label: "" },
+      ];
+      clearLimitComparison();
+      renderLimitEvaluator();
+    }
+    if (action === "append-planner-targets") {
+      const targets = (state.planner.targets || [])
+        .map((target, index) => ({
+          id: `constraint-${Date.now()}-${index}`,
+          stat: data.stats.includes(target.stat) ? target.stat : "will",
+          value: Math.max(0, Number(target.value) || 0),
+          label: target.name || data.statLabels[target.stat] || "规划门槛",
+        }))
+        .filter((target) => target.value > 0);
+      if (!targets.length) {
+        flashStatus("规划页暂无门槛");
+        return;
+      }
+      state.limitEvaluator.constraints = [
+        ...(state.limitEvaluator.constraints || []),
+        ...targets,
+      ];
+      clearLimitComparison();
+      renderLimitEvaluator();
+      flashStatus("已追加门槛");
+    }
+    if (action === "remove-limit-constraint") {
+      const index = Number(actionNode.dataset.index);
+      state.limitEvaluator.constraints = (state.limitEvaluator.constraints || []).filter((_, itemIndex) => itemIndex !== index);
+      clearLimitComparison();
+      renderLimitEvaluator();
+    }
     if (action === "remove-gear-set") {
       const index = Number(actionNode.dataset.index);
       state.planner.gearSets.splice(index, 1);
@@ -1731,6 +2594,7 @@
 
   document.addEventListener("change", (event) => {
     const target = event.target;
+    rememberStateSoon();
     if (target.matches("[data-equipment]")) {
       state.equipmentStats[target.dataset.equipment] = Number(target.value) || 0;
       clearLimitComparison();
@@ -1753,6 +2617,9 @@
       renderPlanner();
       renderResults();
     }
+    if (target.matches("[data-injected-potential]")) {
+      state.injectedPotential[target.dataset.injectedPotential] = Number(target.value) || 0;
+    }
     if (target.matches("[data-current-enabled]")) {
       state.currentState.enabled = target.checked;
       renderGrowthPlan();
@@ -1770,6 +2637,15 @@
       state.currentState.stats[target.dataset.currentStat] = Number(target.value) || 0;
       renderPlanner();
       renderResults();
+    }
+    if (target.matches("[data-heirloom-field]")) {
+      const field = target.dataset.heirloomField;
+      state.heirloom[field] = field === "level" ? clampHeirloomLevel(target.value) : target.value;
+      renderHeirloom();
+    }
+    if (target.matches("[data-heirloom-potential]")) {
+      state.heirloom.characterPotential[target.dataset.heirloomPotential] = Number(target.value) || 0;
+      renderHeirloom();
     }
     if (target.matches("[data-field='level']")) {
       state.level = Number(target.value) || 1;
@@ -1863,13 +2739,18 @@
       clearLimitComparison();
       renderLimitEvaluator();
     }
-    if (target.matches("[data-limit-weight]")) {
-      state.limitEvaluator.targetWeights[target.dataset.limitWeight] = Math.max(0, Number(target.value) || 0);
+    if (target.matches("[data-limit-constraint-field]")) {
+      const index = Number(target.dataset.limitConstraint);
+      const field = target.dataset.limitConstraintField;
+      const constraint = state.limitEvaluator.constraints?.[index];
+      if (!constraint) return;
+      constraint[field] = field === "value" ? Math.max(0, Number(target.value) || 0) : target.value;
+      state.limitEvaluator.constraints = normalizeLimitConstraints(state.limitEvaluator.constraints);
       clearLimitComparison();
       renderLimitEvaluator();
     }
-    if (target.matches("[data-limit-toggle]")) {
-      state.limitEvaluator[target.dataset.limitToggle] = target.checked;
+    if (target.matches("[data-limit-weight]")) {
+      state.limitEvaluator.targetWeights[target.dataset.limitWeight] = Math.max(0, Number(target.value) || 0);
       clearLimitComparison();
       renderLimitEvaluator();
     }
@@ -1924,6 +2805,12 @@
       renderTraits();
       renderPlanner();
       renderResults();
+    }
+  });
+
+  document.addEventListener("input", (event) => {
+    if (rememberInputDraft(event.target)) {
+      rememberStateSoon();
     }
   });
 

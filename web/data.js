@@ -309,6 +309,7 @@
     trait("m-frey-tenacity", "索弗利夫的坚毅", "mortal_trait", "弗莱", "脸型", {}, {}, {}, {}),
     trait("m-chewa-stigma", "切瓦利王族圣痕", "mortal_trait", "切瓦", "圣痕", { strength: 9, constitution: 5 }, {}, {}, {}),
     trait("m-chewa-power", "欧里克的神力", "mortal_trait", "切瓦", "脸型", {}, { strength: 0.10 }, {}, {}),
+    trait("m-chewa-lion-power", "雄狮之力", "mortal_trait", "切瓦", "脸型", { strength: 5 }, {}, {}, {}),
     trait("m-chewa-blessing", "欧里克的赐福", "mortal_trait", "切瓦", "鼻子", {}, {}, {}, {}),
     trait("m-hill-stigma", "希尔王族圣痕", "mortal_trait", "希尔", "圣痕", { technique: 5, constitution: 9 }, {}, {}, {}),
     trait("m-hill-body", "超人体格", "mortal_trait", "希尔", "脸型", {}, { constitution: 0.10 }, {}, {}),
@@ -325,6 +326,7 @@
     trait("m-gut-bad-face", "烂脸", "mortal_trait", "古特", "脸型", { strength: 9, agility: 5 }, {}, {}, {}),
     trait("m-gut-cannibal", "同类相食", "mortal_trait", "古特", "嘴唇", {}, { strength: 0.10, agility: 0.05 }, {}, {}),
     trait("m-gut-evil-blood", "邪神之血", "mortal_trait", "古特", "眼睛", {}, {}, {}, {}),
+    trait("m-gut-sea-curse", "海神诅咒", "mortal_trait", "古特", "", {}, {}, {}, {}),
 
     trait("saint-justice", "正义誓言", "divine_skill", "圣子", "", {}, {}, { strength: 0.1, constitution: 0.1, will: 0.1 }, { technique: 1.7, strength: 1.3, constitution: 0.6 }),
     trait("saint-free", "无拘之魂", "divine_skill", "圣子", "", {}, {}, { strength: 0.1, constitution: 0.1, will: 0.1 }, { strength: 1.7, technique: 1.3, agility: 0.6 }),
@@ -384,6 +386,10 @@
     "猎豹印记": {
       effectText: "敏捷+10%、近程偏斜+26%",
       lifespanText: "+15",
+    },
+    "海神诅咒": {
+      effectText: "偏斜-10%，攻击+8",
+      lifespanText: "未录入",
     },
   };
 

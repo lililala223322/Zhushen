@@ -1,0 +1,18 @@
+{
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/core"
+  ],
+  "scripts": {
+    "verify:web-core": "node scripts/verify-web-core.js",
+    "core:typecheck": "npm --prefix packages/core run typecheck",
+    "core:build": "npm --prefix packages/core run build",
+    "core:test": "npm --prefix packages/core run test",
+    "web:core": "rolldown packages/core/src/browser.ts --file web/core.js --format iife --name ZhushenCoreBundle --platform browser"
+  },
+  "devDependencies": {
+    "rolldown": "^1.1.3",
+    "vitest": "^4.1.9"
+  }
+}
